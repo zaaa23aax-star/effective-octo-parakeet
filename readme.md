@@ -5,7 +5,7 @@ A Streamlit dashboard to test and compare text generation models using the [Open
 ---
 
 ## 🚀 Features
-- Test multiple AI models side-by-side  
+- Test multiple AI models  
 - Shows response time, token count, and text output  
 - Modern Streamlit interface  
 - Works locally or deployable on Streamlit Cloud  
@@ -18,3 +18,4 @@ git clone https://github.com/YOUR_USERNAME/ai_tester_app.git
 cd ai_tester_app
 pip install -r requirements.txt
 streamlit run ai_tester_full.py
+
