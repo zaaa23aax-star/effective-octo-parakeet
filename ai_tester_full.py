@@ -6,8 +6,8 @@ import datetime
 
 st.set_page_config(page_title="🧠 AI Model Tester", layout="wide")
 
-st.title("🧠 Simple AI Model Tester (OpenRouter)")
-st.markdown("Test and compare text-generation models easily via the OpenRouter API.")
+st.title("🧠 OpenRouter AI Model Tester")
+st.markdown("Test and compare text-generation models from OpenRouter dynamically!")
 
 # --- Sidebar ---
 api_key = st.sidebar.text_input("🔑 Enter your OpenRouter API Key:", type="password")
@@ -17,17 +17,32 @@ if not api_key:
 
 st.sidebar.markdown("[Get your API key](https://openrouter.ai/keys)")
 
-prompt = st.text_area("📝 Enter your prompt:", height=150)
+# --- Load available models dynamically ---
+@st.cache_data(ttl=3600)
+def fetch_models(api_key):
+    url = "https://openrouter.ai/api/v1/models"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    res = requests.get(url, headers=headers)
+    if res.status_code == 200:
+        data = res.json()
+        models = [m["id"] for m in data["data"]]
+        return sorted(models)
+    else:
+        st.error(f"❌ Could not fetch models: {res.text}")
+        return []
 
-models = st.multiselect(
-    "Select AI Models to Compare:",
-    [
-        "gpt-4o-mini",
-        "gpt-4o",
-        "meta-llama/llama-3.1-70b-instruct",
-        "mistralai/mixtral-8x7b",
-    ],
-    default=["gpt-4o-mini"],
+models_list = fetch_models(api_key)
+if not models_list:
+    st.stop()
+
+# --- Prompt input ---
+prompt = st.text_area("📝 Enter your prompt:", height=150, placeholder="e.g. Explain quantum computing in simple terms...")
+
+# --- Model selection with search ---
+selected_models = st.multiselect(
+    "🤖 Select models to test (type to search):",
+    options=models_list,
+    default=[models_list[0]] if models_list else [],
 )
 
 if "runs" not in st.session_state:
@@ -53,9 +68,11 @@ def call_model(model, prompt):
 if st.button("🚀 Run Test"):
     if not prompt.strip():
         st.warning("Please enter a prompt.")
+    elif not selected_models:
+        st.warning("Please select at least one model.")
     else:
         results = []
-        for model in models:
+        for model in selected_models:
             with st.spinner(f"Querying {model}..."):
                 res = call_model(model, prompt)
                 results.append(res)
@@ -68,7 +85,7 @@ if st.button("🚀 Run Test"):
         )
         st.success("✅ Done!")
 
-# --- Display last 3 runs ---
+# --- Display last runs ---
 for run in reversed(st.session_state["runs"][-3:]):
     st.markdown(f"### 🧾 Test from {run['timestamp']}")
     st.write(f"**Prompt:** {run['prompt']}")
