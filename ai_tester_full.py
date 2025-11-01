@@ -16,8 +16,8 @@ st.markdown("Enter a prompt once — get both **AI-generated text** and **relate
 # -----------------------------
 # Try to get from secrets first, fallback to manual input
 try:
-    OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "").strip()
-    SERPAPI_KEY = st.secrets.get("SERPAPI_KEY", "").strip()
+    OPENROUTER_API_KEY = str(st.secrets.get("OPENROUTER_API_KEY", "")).strip().strip('"').strip("'")
+    SERPAPI_KEY = str(st.secrets.get("SERPAPI_KEY", "")).strip().strip('"').strip("'")
 except:
     OPENROUTER_API_KEY = ""
     SERPAPI_KEY = ""
