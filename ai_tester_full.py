@@ -5,6 +5,15 @@ import time
 import datetime
 from io import BytesIO
 from PIL import Image
+import os
+from dotenv import load_dotenv
+
+# -----------------------------
+# Load environment variables
+# -----------------------------
+load_dotenv()
+openrouter_key = os.getenv("OPENROUTER_API_KEY")
+serpapi_key = os.getenv("SERPAPI_KEY")
 
 # -----------------------------
 # Streamlit Setup
@@ -15,17 +24,10 @@ st.title("🧠 AI Text & 🖼️ Image Generator")
 st.markdown("Enter a prompt once — get both **AI-generated text** and **related images** instantly!")
 
 # -----------------------------
-# Sidebar API Keys
+# Check API keys
 # -----------------------------
-st.sidebar.header("🔑 API Keys")
-openrouter_key = st.sidebar.text_input("OpenRouter API Key:", type="password")
-serpapi_key = st.sidebar.text_input("SerpAPI Key:", type="password")
-
-st.sidebar.markdown("[Get OpenRouter Key](https://openrouter.ai/keys)")
-st.sidebar.markdown("[Get SerpAPI Key](https://serpapi.com/manage-api-key)")
-
 if not openrouter_key or not serpapi_key:
-    st.warning("Please enter both API keys in the sidebar.")
+    st.error("❌ Missing API keys. Please add them to a `.env` file.")
     st.stop()
 
 # -----------------------------
