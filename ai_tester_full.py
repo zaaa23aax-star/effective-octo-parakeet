@@ -4,15 +4,12 @@ from io import BytesIO
 from PIL import Image
 import re
 
-# -----------------------------
-# Streamlit setup
-# -----------------------------
 st.set_page_config(page_title="🛍️ Free Amazon Finder", layout="wide")
 st.title("🛍️ 100% FREE Amazon Product Finder")
 st.markdown("AI descriptions & images using OpenRouter/Groq free models.")
 
 # -----------------------------
-# API keys from Streamlit Secrets
+# API keys
 # -----------------------------
 try:
     OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
@@ -54,21 +51,16 @@ image_model_choice = st.selectbox(
 product_name = st.text_input("🔍 Product Name", placeholder="e.g. bluetooth speaker")
 
 # -----------------------------
-# Simple Amazon Scraper (no bs4)
+# Amazon Scraper (regex)
 # -----------------------------
 def scrape_amazon(query, max_results=5):
     url = f"https://www.amazon.com/s?k={query.replace(' ', '+')}"
     headers = {"User-Agent": "Mozilla/5.0"}
-    
     try:
         page = requests.get(url, headers=headers, timeout=10).text
-        # Extract ASINs
         asins = re.findall(r'data-asin="(\w+)"', page)
-        # Extract titles
         titles = re.findall(r'<span class="a-size-medium a-color-base a-text-normal">(.+?)</span>', page)
-        # Extract image URLs
         imgs = re.findall(r'<img.*?class="s-image".*?src="(.*?)"', page)
-        
         results = []
         for i in range(min(max_results, len(asins))):
             results.append({
@@ -94,7 +86,6 @@ ASIN: {product['asin']}
 
 Make it emotional, lifestyle-style, under 80 words with a few emojis.
 """
-    # GROQ
     if model_id in groq_free_models.values():
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
@@ -102,3 +93,66 @@ Make it emotional, lifestyle-style, under 80 words with a few emojis.
     else:
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+        data = {"model": model_id, "messages": [{"role": "user", "content": prompt}]}
+
+    try:
+        r = requests.post(url, json=data, headers=headers)
+        return r.json()["choices"][0]["message"]["content"]
+    except:
+        return "🌟 Beautiful product loved by shoppers!"
+
+# -----------------------------
+# Image Generator
+# -----------------------------
+def generate_image(prompt):
+    model = image_models[image_model_choice]
+    url = "https://openrouter.ai/api/v1/images"
+    headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"}
+    data = {"model": model, "prompt": prompt}
+    try:
+        r = requests.post(url, json=data, headers=headers)
+        img_bytes = BytesIO(requests.get(r.json()["data"][0]["url"]).content)
+        return Image.open(img_bytes)
+    except:
+        return None
+
+# -----------------------------
+# Display Results Function
+# -----------------------------
+def display_products(products):
+    for p in products:
+        st.subheader(p["title"])
+        col1, col2 = st.columns([1, 2])
+        with col1:
+            if p["image"]:
+                st.image(p["image"])
+            st.link_button("Open on Amazon", p["link"])
+        with col2:
+            with st.spinner("✨ Writing description..."):
+                model_id = (openrouter_free_models[model_choice]
+                            if model_choice in openrouter_free_models
+                            else groq_free_models[model_choice])
+                desc = generate_description(p, model_id)
+                st.write(desc)
+            with st.spinner("🎨 Generating Pinterest image..."):
+                img = generate_image(desc)
+                if img:
+                    st.image(img)
+                else:
+                    st.info("Image model unavailable.")
+        st.divider()
+
+# -----------------------------
+# 🔽 SEARCH BUTTON AT THE BOTTOM
+# -----------------------------
+st.markdown("---")  # separator
+
+if st.button("🔍 Search Amazon (FREE)"):
+    if not product_name.strip():
+        st.warning("Type a product name first.")
+    else:
+        products = scrape_amazon(product_name, max_results=5)
+        if not products:
+            st.error("No results found.")
+        else:
+            display_products(products)
