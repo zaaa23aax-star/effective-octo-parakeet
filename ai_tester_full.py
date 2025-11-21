@@ -1,12 +1,12 @@
 import streamlit as st
+import pandas as pd
 import requests
 from io import BytesIO
 from PIL import Image
 import re
 
-st.set_page_config(page_title="🛍️ Free Amazon Finder", layout="wide")
-st.title("🛍️ 100% FREE Amazon Product Finder")
-st.markdown("AI descriptions & images using OpenRouter/Groq free models.")
+st.set_page_config(page_title="🛍️ Interactive Amazon Finder", layout="wide")
+st.title("🛍️ Amazon Product Finder with Interactive Backup Models")
 
 # -----------------------------
 # API keys
@@ -14,14 +14,15 @@ st.markdown("AI descriptions & images using OpenRouter/Groq free models.")
 try:
     OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
     GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
+    SERPAPI_KEY = st.secrets.get("SERPAPI_KEY", "")
 except:
-    st.error("❌ Add OPENROUTER_API_KEY and GROQ_API_KEY to Streamlit secrets.")
+    st.error("❌ Add OpenRouter, Groq, and SerpAPI keys in Streamlit secrets.")
     st.stop()
 
 # -----------------------------
-# Model selection
+# Predefined text models
 # -----------------------------
-openrouter_free_models = {
+openrouter_models = {
     "🔥 Mixtral 8x7B (FREE)": "mistralai/mixtral-8x7b-instruct:free",
     "🔥 Mistral 7B (FREE)": "mistralai/mistral-7b-instruct:free",
     "🔥 Llama 3 8B (FREE)": "meta-llama/llama-3-8b-instruct:free",
@@ -29,30 +30,74 @@ openrouter_free_models = {
     "🔥 AUTO (Best free)": "openrouter/auto"
 }
 
-groq_free_models = {
+groq_models = {
     "⚡ Llama 3 8B (GROQ - FREE)": "llama3-8b-8192",
     "⚡ Mixtral 8x7B (GROQ - FREE)": "mixtral-8x7b-32768"
 }
 
-image_models = {
-    "🖼️ SD3 FREE (OpenRouter)": "stability.ai/sd3:free"
-}
+all_models = {**openrouter_models, **groq_models}
 
+# -----------------------------
+# Primary model selection
+# -----------------------------
 model_choice = st.selectbox(
-    "🤖 Choose AI Model",
-    list(openrouter_free_models.keys()) + list(groq_free_models.keys())
+    "🤖 Choose Primary Text Model:",
+    list(all_models.keys())
 )
 
+# -----------------------------
+# Interactive backup models table
+# -----------------------------
+st.markdown("### 🛡️ Backup Text Models (editable)")
+# Default backup table
+default_backup = pd.DataFrame(
+    [(k, v) for k, v in all_models.items() if k != model_choice],
+    columns=["Model Name", "Model ID"]
+)
+backup_table = st.data_editor(default_backup, num_rows="dynamic", use_container_width=True)
+
+# Convert table to dictionary for lookup
+backup_models_dict = {row["Model Name"]: row["Model ID"] for _, row in backup_table.iterrows()}
+
+# -----------------------------
+# Image models
+# -----------------------------
+image_models = {"🖼️ SD3 FREE (OpenRouter)": "stability.ai/sd3:free"}
 image_model_choice = st.selectbox(
-    "🖼️ Choose FREE Image Model",
+    "🖼️ Choose FREE Image Model:",
     list(image_models.keys())
 )
 
-product_name = st.text_input("🔍 Product Name", placeholder="e.g. bluetooth speaker")
+# -----------------------------
+# Product input
+# -----------------------------
+product_name = st.text_input("🔍 Product Name", placeholder="e.g., bluetooth speaker")
 
 # -----------------------------
-# Amazon Scraper (regex)
+# Amazon Search Fallback
 # -----------------------------
+def search_serpapi(query, max_results=5):
+    if not SERPAPI_KEY:
+        return []
+    url = "https://serpapi.com/search.json"
+    params = {"engine": "amazon", "k": query, "amazon_domain": "amazon.com", "api_key": SERPAPI_KEY}
+    try:
+        res = requests.get(url, params=params, timeout=15).json()
+        products = []
+        for item in res.get("organic_results", [])[:max_results]:
+            products.append({
+                "title": item.get("title"),
+                "asin": item.get("asin"),
+                "link": item.get("link"),
+                "image": item.get("thumbnail"),
+                "price": item.get("price"),
+                "rating": item.get("rating"),
+                "reviews": item.get("reviews_count")
+            })
+        return products
+    except:
+        return []
+
 def scrape_amazon(query, max_results=5):
     url = f"https://www.amazon.com/s?k={query.replace(' ', '+')}"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -73,8 +118,17 @@ def scrape_amazon(query, max_results=5):
     except:
         return []
 
+def search_amazon_with_fallback(query, max_results=5):
+    results = search_serpapi(query, max_results)
+    if results:
+        return results, "SerpAPI 🔥"
+    results = scrape_amazon(query, max_results)
+    if results:
+        return results, "Scraper fallback 🖇️"
+    return [], "No source found"
+
 # -----------------------------
-# AI Description Generator
+# AI Description & Image
 # -----------------------------
 def generate_description(product, model_id):
     prompt = f"""
@@ -86,7 +140,7 @@ ASIN: {product['asin']}
 
 Make it emotional, lifestyle-style, under 80 words with a few emojis.
 """
-    if model_id in groq_free_models.values():
+    if model_id in groq_models.values():
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
         data = {"model": model_id, "messages": [{"role": "user", "content": prompt}]}
@@ -101,9 +155,6 @@ Make it emotional, lifestyle-style, under 80 words with a few emojis.
     except:
         return "🌟 Beautiful product loved by shoppers!"
 
-# -----------------------------
-# Image Generator
-# -----------------------------
 def generate_image(prompt):
     model = image_models[image_model_choice]
     url = "https://openrouter.ai/api/v1/images"
@@ -117,42 +168,41 @@ def generate_image(prompt):
         return None
 
 # -----------------------------
-# Display Results Function
+# Display products
 # -----------------------------
-def display_products(products):
+def display_products(products, source_name="Unknown"):
+    st.info(f"Results from: {source_name}")
     for p in products:
         st.subheader(p["title"])
         col1, col2 = st.columns([1, 2])
         with col1:
-            if p["image"]:
+            if p.get("image"):
                 st.image(p["image"])
             st.link_button("Open on Amazon", p["link"])
         with col2:
-            with st.spinner("✨ Writing description..."):
-                model_id = (openrouter_free_models[model_choice]
-                            if model_choice in openrouter_free_models
-                            else groq_free_models[model_choice])
-                desc = generate_description(p, model_id)
-                st.write(desc)
-            with st.spinner("🎨 Generating Pinterest image..."):
-                img = generate_image(desc)
-                if img:
-                    st.image(img)
-                else:
-                    st.info("Image model unavailable.")
+            # Try primary model
+            model_id = all_models[model_choice]
+            desc = generate_description(p, model_id)
+            # Try backup models from interactive table if primary fails
+            for backup_name, backup_id in backup_models_dict.items():
+                if not desc or "Beautiful product" in desc:
+                    desc = generate_description(p, backup_id)
+            st.write(desc)
+            img = generate_image(desc)
+            if img:
+                st.image(img)
         st.divider()
 
 # -----------------------------
-# 🔽 SEARCH BUTTON AT THE BOTTOM
+# Search button at bottom
 # -----------------------------
-st.markdown("---")  # separator
-
+st.markdown("---")
 if st.button("🔍 Search Amazon (FREE)"):
     if not product_name.strip():
         st.warning("Type a product name first.")
     else:
-        products = scrape_amazon(product_name, max_results=5)
+        products, source_name = search_amazon_with_fallback(product_name)
         if not products:
-            st.error("No results found.")
+            st.error("No results found on any source.")
         else:
-            display_products(products)
+            display_products(products, source_name)
