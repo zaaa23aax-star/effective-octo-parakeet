@@ -1,45 +1,58 @@
 import streamlit as st
 import requests
-from io import BytesIO
-from PIL import Image
 import re
 import json
 import os
+from io import BytesIO
+from PIL import Image
 
-# Google APIs
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+# Google Drive (Service Account)
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload
+from googleapiclient.http import MediaFileUpload
 
 # ----------------------------------------------------
 # STREAMLIT CONFIG
 # ----------------------------------------------------
 st.set_page_config(page_title="🛍️ Amazon Finder + Drive Sync", layout="wide")
-st.title("🛍️ Amazon Product Finder + Google Drive Sync")
+st.title("🛍️ Amazon Product Finder + Google Drive (Service Account)")
 
 # ----------------------------------------------------
-# REQUIRED SECRETS
+# SECRETS
 # ----------------------------------------------------
 try:
     OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
     GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
     SERPAPI_KEY = st.secrets.get("SERPAPI_KEY", "")
-except:
-    st.error("❌ Missing API keys in Streamlit secrets.")
+
+    service_account_info = json.loads(st.secrets["SERVICE_ACCOUNT_JSON"])
+except Exception as e:
+    st.error("❌ Missing secrets or invalid service account JSON.")
     st.stop()
 
 AFFILIATE_TAG = "passionismyso-20"
 
 # ----------------------------------------------------
-# TEXT MODELS
+# GOOGLE DRIVE (SERVICE ACCOUNT)
+# ----------------------------------------------------
+SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+creds = service_account.Credentials.from_service_account_info(
+    service_account_info,
+    scopes=SCOPES
+)
+
+drive_service = build("drive", "v3", credentials=creds)
+
+# ----------------------------------------------------
+# AI MODELS
 # ----------------------------------------------------
 all_models = {
-    "Mixtral 7x8B": "mistralai/mixtral-8x7b-instruct:free",
-    "Mistral 7B": "mistralai/mistral-7b-instruct:free",
+    "Mixtral 8x7B (FREE)": "mistralai/mixtral-8x7b-instruct:free",
+    "Mistral 7B (FREE)": "mistralai/mistral-7b-instruct:free",
     "Llama 3 8B (GROQ)": "llama3-8b-8192",
     "Qwen 2.5 7B": "qwen/qwen2.5-7b-instruct",
-    "Phi-3 Mini": "microsoft/phi-3-mini-128k-instruct"
+    "Phi-3 Mini": "microsoft/phi-3-mini-128k-instruct",
 }
 
 model_choice = st.selectbox("🤖 Choose Model", list(all_models.keys()))
@@ -51,41 +64,17 @@ backup_models = st.multiselect("🛡️ Backup Models", [m for m in all_models i
 product_name = st.text_input("🔍 Product Name", placeholder="e.g. wireless earbuds")
 
 # ----------------------------------------------------
-# GOOGLE DRIVE LOGIN
-# ----------------------------------------------------
-SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-
-def drive_login():
-    """Authenticate user with Google OAuth."""
-    if not os.path.exists("client_secret.json"):
-        st.error("Upload client_secret.json first!")
-        return None
-
-    creds = None
-
-    if os.path.exists("token.json"):
-        creds = Credentials.from_authorized_user_file("token.json", SCOPES)
-
-    if not creds or not creds.valid:
-        flow = InstalledAppFlow.from_client_secrets_file("client_secret.json", SCOPES)
-        creds = flow.run_local_server(port=0)
-
-        with open("token.json", "w") as token:
-            token.write(creds.to_json())
-
-    return build("drive", "v3", credentials=creds)
-
-
-drive_service = drive_login()
-
-# ----------------------------------------------------
-# AMAZON SEARCH HELPERS
+# AFFILIATE TAG
 # ----------------------------------------------------
 def add_affiliate_tag(url):
     if "tag=" in url:
         return url
-    return url + f"&tag={AFFILIATE_TAG}"
+    separator = "&" if "?" in url else "?"
+    return f"{url}{separator}tag={AFFILIATE_TAG}"
 
+# ----------------------------------------------------
+# AMAZON SEARCH (SERPAPI + SCRAPER)
+# ----------------------------------------------------
 def search_serpapi(query):
     if not SERPAPI_KEY:
         return []
@@ -95,7 +84,7 @@ def search_serpapi(query):
         "engine": "amazon",
         "k": query,
         "amazon_domain": "amazon.com",
-        "api_key": SERPAPI_KEY
+        "api_key": SERPAPI_KEY,
     }
 
     try:
@@ -126,14 +115,14 @@ def scrape_amazon(query):
         price = re.search(r'\$\d[\d,]*\.?\d*', page)
 
         if asin and title and price:
-            asin = asin.group(1)
-            link = add_affiliate_tag(f"https://www.amazon.com/dp/{asin}")
+            asin_id = asin.group(1)
+            link = add_affiliate_tag(f"https://www.amazon.com/dp/{asin_id}")
             return [{
-                "asin": asin,
+                "asin": asin_id,
                 "title": title.group(1),
                 "image": img.group(1) if img else None,
                 "price": price.group(0),
-                "link": link
+                "link": link,
             }]
     except:
         return []
@@ -152,20 +141,19 @@ def search_amazon_fallback(query):
     return [], "No Results"
 
 # ----------------------------------------------------
-# MODEL GENERATION
+# GENERATE DESCRIPTION
 # ----------------------------------------------------
 def generate_description(product, model_id):
     prompt = f"""
-Create a short Pinterest-style marketing description:
+Write a Pinterest-style product description:
 
 Title: {product['title']}
 ASIN: {product['asin']}
 
-Requirements:
-- 2–3 engaging sentences
-- emotional, aesthetic, lifestyle tone
-- < 80 words
-- Include emojis naturally
+Rules:
+- 2–3 emotional lifestyle sentences
+- less than 80 words
+- include emojis
 """
 
     if model_id == "llama3-8b-8192":
@@ -181,37 +169,36 @@ Requirements:
         r = requests.post(url, json=data, headers=headers, timeout=15)
         return r.json()["choices"][0]["message"]["content"]
     except:
-        return "✨ Beautiful and useful — a must-have! ✨"
+        return "✨ Stylish, practical, and a must-have! ✨"
 
 # ----------------------------------------------------
-# DRIVE FILE UPLOAD / UPDATE
+# DRIVE FILE HANDLING
 # ----------------------------------------------------
-def upload_or_update_file(text, filename="product_report.txt"):
-    """Updates file if exists, else creates new one."""
+def upload_or_update_file(content, filename="product_report.txt"):
     query = f"name='{filename}'"
-    results = drive_service.files().list(q=query, fields="files(id, name)").execute()
-    files = results.get("files", [])
+    existing = drive_service.files().list(q=query, fields="files(id)").execute()
 
-    temp_path = "/tmp/" + filename
-    with open(temp_path, "w") as f:
-        f.write(text)
+    # Save temporary file
+    path = "/tmp/" + filename
+    with open(path, "w") as f:
+        f.write(content)
 
-    media = MediaFileUpload(temp_path, mimetype="text/plain", resumable=True)
+    media = MediaFileUpload(path, mimetype="text/plain", resumable=True)
 
-    if files:
-        file_id = files[0]["id"]
+    if existing.get("files"):
+        file_id = existing["files"][0]["id"]
         drive_service.files().update(fileId=file_id, media_body=media).execute()
         return file_id, "updated"
 
     file_metadata = {"name": filename}
-    file = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
-    return file["id"], "created"
+    created = drive_service.files().create(body=file_metadata, media_body=media, fields="id").execute()
+    return created["id"], "created"
 
 # ----------------------------------------------------
 # DISPLAY PRODUCT
 # ----------------------------------------------------
-def display_product(p, src):
-    st.info(f"Found using: {src}")
+def display_product(p, origin):
+    st.info(f"Found via {origin}")
     col1, col2 = st.columns([1, 2])
 
     with col1:
@@ -226,24 +213,22 @@ def display_product(p, src):
         for b in backup_models:
             if "must-have" in desc:
                 desc = generate_description(p, all_models[b])
-        st.markdown("### Pinterest-Style Description")
+        st.subheader("Pinterest-Style Description")
         st.write(desc)
 
-    # Generate Drive report
     report = f"""
 TITLE: {p['title']}
 ASIN: {p['asin']}
 PRICE: {p['price']}
-LINK: {p['link']}
+AFFILIATE LINK: {p['link']}
 
 --- DESCRIPTION ---
 
 {desc}
 """
 
-    if drive_service:
-        file_id, status = upload_or_update_file(report)
-        st.success(f"📄 Google Drive file **{status}** successfully! (ID: {file_id})")
+    file_id, status = upload_or_update_file(report)
+    st.success(f"📄 Google Drive file {status}! (ID: {file_id})")
 
 # ----------------------------------------------------
 # SEARCH BUTTON
@@ -256,6 +241,6 @@ if st.button("🔍 Search Deliverable Product"):
     else:
         products, source = search_amazon_fallback(product_name)
         if not products:
-            st.error("No deliverable products found.")
+            st.error("No products found.")
         else:
             display_product(products[0], source)
