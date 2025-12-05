@@ -1,6 +1,5 @@
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
 from io import BytesIO
 from PIL import Image
 import json
@@ -143,3 +142,4 @@ if url:
 # =========================
 if not GOOGLE_AVAILABLE:
     st.warning(f"Google API Unavailable: {GOOGLE_IMPORT_ERROR}")
+
