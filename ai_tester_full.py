@@ -6,6 +6,7 @@ import re
 import json
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 
 # -------------------------------------------------------
 # PAGE SETUP
@@ -17,19 +18,30 @@ st.title("🛍️ Amazon Product Finder - Pinterest Style + Auto Drive Upload")
 # LOAD SECRETS (API KEYS + DRIVE)
 # -------------------------------------------------------
 try:
-    OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
-    GROQ_API_KEY = st.secrets["GROQ_API_KEY"]
-    SERPAPI_KEY = st.secrets.get("SERPAPI_KEY", "")
+    OPENROUTER_API_KEY = str(st.secrets["OPENROUTER_API_KEY"]).strip()
+    GROQ_API_KEY = str(st.secrets["GROQ_API_KEY"]).strip()
+    SERPAPI_KEY = str(st.secrets.get("SERPAPI_KEY", "")).strip()
     SERVICE_ACCOUNT_JSON = st.secrets["SERVICE_ACCOUNT_JSON"]
-except:
-    st.error("❌ Missing Streamlit secrets. Add API keys + SERVICE_ACCOUNT_JSON.")
+except Exception as e:
+    st.error(f"❌ Missing Streamlit secrets: {e}")
+    st.info("""
+    Required secrets:
+    - OPENROUTER_API_KEY
+    - GROQ_API_KEY
+    - SERPAPI_KEY
+    - SERVICE_ACCOUNT_JSON (Google Drive service account)
+    """)
     st.stop()
 
 # -------------------------------------------------------
 # GOOGLE DRIVE SERVICE ACCOUNT LOGIN
 # -------------------------------------------------------
 try:
-    service_info = json.loads(SERVICE_ACCOUNT_JSON)
+    # Handle both string and dict formats
+    if isinstance(SERVICE_ACCOUNT_JSON, str):
+        service_info = json.loads(SERVICE_ACCOUNT_JSON)
+    else:
+        service_info = dict(SERVICE_ACCOUNT_JSON)
 
     creds = service_account.Credentials.from_service_account_info(
         service_info,
@@ -37,8 +49,10 @@ try:
     )
 
     drive_service = build("drive", "v3", credentials=creds)
+    st.sidebar.success("✅ Google Drive connected")
 except Exception as e:
-    st.error(f"Google Drive auth failed: {e}")
+    st.error(f"❌ Google Drive auth failed: {e}")
+    st.info("Make sure SERVICE_ACCOUNT_JSON is a valid Google service account key")
     st.stop()
 
 # -------------------------------------------------------
@@ -47,12 +61,11 @@ except Exception as e:
 AFFILIATE_TAG = "passionismyso-20"
 
 def add_affiliate_tag(link):
-    if "tag=" in link:
+    """Add Amazon affiliate tag to product link."""
+    if not link or "tag=" in link:
         return link
-    if "?" in link:
-        return link + f"&tag={AFFILIATE_TAG}"
-    else:
-        return link + f"?tag={AFFILIATE_TAG}"
+    separator = "&" if "?" in link else "?"
+    return f"{link}{separator}tag={AFFILIATE_TAG}"
 
 # -------------------------------------------------------
 # TEXT MODELS
@@ -62,7 +75,7 @@ all_models = {
     "🔸 Mistral 7B (FREE)": "mistralai/mistral-7b-instruct:free",
     "⚡ Llama 3 8B (Groq)": "llama3-8b-8192",
     "✨ Llama 3 70B": "meta-llama/llama-3-70b-instruct",
-    "✨ Qwen 2.5 32B": "qwen/qwen2.5-32b-instruct"
+    "✨ Qwen 2.5 32B": "qwen/qwen-2.5-32b-instruct"
 }
 
 model_choice = st.selectbox("🤖 Choose AI Model", list(all_models.keys()))
@@ -72,72 +85,89 @@ model_choice = st.selectbox("🤖 Choose AI Model", list(all_models.keys()))
 # -------------------------------------------------------
 product_name = st.text_input("🔍 Product Name", placeholder="e.g. wireless headphones")
 
+# Google Drive Folder ID (make it configurable)
+drive_folder_id = st.text_input(
+    "📁 Google Drive Folder ID (optional)",
+    value="1XAJLIDBpWPYk6-xzGahLfdU4cqzkF7Bc",
+    help="Leave default or paste your own folder ID"
+)
+
 # -------------------------------------------------------
 # AMAZON SEARCH FUNCTIONS
 # -------------------------------------------------------
 def search_serpapi(query):
+    """Search Amazon via SerpAPI."""
     if not SERPAPI_KEY:
         return []
 
     url = "https://serpapi.com/search.json"
     params = {
         "engine": "amazon",
-        "k": query,
+        "q": query,  # Fixed: was "k", should be "q"
         "amazon_domain": "amazon.com",
         "api_key": SERPAPI_KEY
     }
 
     try:
         res = requests.get(url, params=params, timeout=15).json()
-        for item in res.get("organic_results", []):
-            if item.get("link") and "amazon.com" in item["link"] and item.get("price"):
-                return [{
-                    "title": item["title"],
-                    "asin": item.get("asin"),
+        products = []
+        
+        for item in res.get("organic_results", [])[:1]:  # Get first result
+            if item.get("link") and "amazon.com" in item["link"]:
+                products.append({
+                    "title": item.get("title", "No title"),
+                    "asin": item.get("asin", "N/A"),
                     "link": add_affiliate_tag(item["link"]),
-                    "image": item.get("thumbnail"),
-                    "price": item.get("price"),
-                }]
-        return []
-    except:
+                    "image": item.get("thumbnail", ""),
+                    "price": item.get("price", "Price not available"),
+                })
+        
+        return products
+    except Exception as e:
+        st.warning(f"SerpAPI error: {e}")
         return []
 
 
 def scrape_amazon(query):
+    """Fallback: scrape Amazon directly."""
     url = f"https://www.amazon.com/s?k={query.replace(' ', '+')}"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
 
     try:
         page = requests.get(url, headers=headers, timeout=10).text
 
-        asin_match = re.search(r'data-asin="(\w+)"', page)
+        asin_match = re.search(r'data-asin="(\w{10})"', page)
         title_match = re.search(
             r'<span class="a-size-medium a-color-base a-text-normal">(.+?)</span>', page
         )
         img_match = re.search(r'<img.*?class="s-image".*?src="(.*?)"', page)
-        price_match = re.search(r'\$\d[\d,]*\.?\d*', page)
+        price_match = re.search(r'\$[\d,]+\.?\d{0,2}', page)
 
-        if asin_match and title_match and price_match:
+        if asin_match and title_match:
             link = f"https://www.amazon.com/dp/{asin_match.group(1)}"
             link = add_affiliate_tag(link)
 
             return [{
                 "asin": asin_match.group(1),
-                "title": title_match.group(1),
+                "title": title_match.group(1).strip(),
                 "image": img_match.group(1) if img_match else None,
                 "link": link,
-                "price": price_match.group(0)
+                "price": price_match.group(0) if price_match else "N/A"
             }]
         return []
-    except:
+    except Exception as e:
+        st.warning(f"Scraper error: {e}")
         return []
 
 
 def search_amazon_fallback(query):
+    """Try SerpAPI first, then fallback to scraping."""
+    # Try SerpAPI
     r1 = search_serpapi(query)
     if r1:
         return r1, "SerpAPI 🔥"
 
+    # Try scraping
     r2 = scrape_amazon(query)
     if r2:
         return r2, "Scraper Fallback 🖇️"
@@ -148,103 +178,204 @@ def search_amazon_fallback(query):
 # PINTEREST DESCRIPTION VIA AI
 # -------------------------------------------------------
 def generate_pinterest_description(product, model_id):
-    prompt = f"""
-Write a short Pinterest-style promotional description (max 80 words).
+    """Generate Pinterest-style marketing description."""
+    prompt = f"""Write a short Pinterest-style promotional description (max 80 words).
 
 Product:
 Title: {product["title"]}
 ASIN: {product["asin"]}
+Price: {product["price"]}
 
 Tone:
-• Emotional + lifestyle
-• Benefits > features
+• Emotional + lifestyle focused
+• Benefits over features
 • Add emojis naturally
-"""
+• Make it compelling and shareable
 
+Keep it under 80 words!"""
+
+    # Choose API based on model
     if model_id == "llama3-8b-8192":  # Groq backend
         url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {GROQ_API_KEY}"}
-    else:
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+    else:  # OpenRouter
         url = "https://openrouter.ai/api/v1/chat/completions"
-        headers = {"Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                   "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Content-Type": "application/json"
+        }
 
-    data = {"model": model_id, "messages": [{"role": "user", "content": prompt}]}
+    data = {
+        "model": model_id,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 150
+    }
 
     try:
-        r = requests.post(url, json=data, headers=headers, timeout=20)
-        return r.json()["choices"][0]["message"]["content"]
-    except:
-        return f"{product['title']} — a must-have! (ASIN: {product['asin']})"
+        r = requests.post(url, json=data, headers=headers, timeout=30)
+        if r.status_code == 200:
+            return r.json()["choices"][0]["message"]["content"].strip()
+        else:
+            return f"✨ {product['title']} — A must-have item! Get yours now! (ASIN: {product['asin']})"
+    except Exception as e:
+        st.warning(f"AI generation error: {e}")
+        return f"✨ {product['title']} — A must-have item! Get yours now! (ASIN: {product['asin']})"
 
 # -------------------------------------------------------
 # GOOGLE DRIVE UPLOAD
 # -------------------------------------------------------
-def upload_to_drive(filename, content):
-    file_metadata = {
-        "name": filename,
-        "parents": ["1XAJLIDBpWPYk6-xzGahLfdU4cqzkF7Bc"]  # your chosen folder
-    }
+def upload_to_drive(filename, content, folder_id):
+    """Upload text report to Google Drive."""
+    try:
+        file_metadata = {
+            "name": filename,
+            "parents": [folder_id] if folder_id else []
+        }
 
-    media = {
-        "mimeType": "text/plain",
-        "body": content
-    }
+        media = MediaIoBaseUpload(
+            BytesIO(content.encode('utf-8')),
+            mimetype='text/plain',
+            resumable=True
+        )
 
-    file = drive_service.files().create(
-        body=file_metadata,
-        media_body=BytesIO(content.encode()),
-        fields="id"
-    ).execute()
+        file = drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, webViewLink"
+        ).execute()
 
-    return file.get("id")
+        return file.get("id"), file.get("webViewLink")
+    except Exception as e:
+        st.error(f"Drive upload failed: {e}")
+        return None, None
 
 # -------------------------------------------------------
 # DISPLAY RESULTS
 # -------------------------------------------------------
 def display_product(product, source):
-    st.info(f"📡 Source: {source}")
-    st.subheader(product["title"])
-
+    """Display product with Pinterest description and upload to Drive."""
+    st.success(f"📡 Source: {source}")
+    
+    # Product title
+    st.markdown(f"## {product['title']}")
+    
     col1, col2 = st.columns([1, 2])
 
     with col1:
+        # Product image
         if product["image"]:
-            st.image(product["image"])
+            try:
+                img_data = requests.get(product["image"], timeout=10).content
+                img = Image.open(BytesIO(img_data))
+                st.image(img, use_container_width=True)
+            except:
+                st.info("📦 Image unavailable")
+        
+        # Product details
         st.markdown(f"**ASIN:** `{product['asin']}`")
         st.markdown(f"**Price:** {product['price']}")
-        st.link_button("Open on Amazon", product["link"])
+        
+        # Amazon link
+        st.link_button(
+            "🛒 View on Amazon",
+            product["link"],
+            use_container_width=True,
+            type="primary"
+        )
 
     with col2:
-        desc = generate_pinterest_description(product, all_models[model_choice])
-        st.markdown("### ✨ Pinterest Description")
-        st.write(desc)
+        # Generate Pinterest description
+        with st.spinner("✨ Generating Pinterest-style description..."):
+            desc = generate_pinterest_description(product, all_models[model_choice])
+        
+        st.markdown("### 📌 Pinterest Description")
+        st.markdown(f"""
+        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
+                    padding: 20px; border-radius: 12px; color: white; margin: 15px 0;">
+            <p style="margin: 0; font-size: 16px; line-height: 1.6;">
+                {desc}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Create report
+        report = f"""Amazon Product Report
+======================
 
-        report = f"""
-Product Report
---------------
 Title: {product['title']}
 ASIN: {product['asin']}
 Price: {product['price']}
-Link: {product['link']}
+Amazon Link: {product['link']}
 
-Description:
+Pinterest-Style Description:
 {desc}
+
+---
+Generated by Amazon Product Finder
 """
-        file_id = upload_to_drive(f"{product['asin']}_report.txt", report)
-        st.success(f"Report saved to Drive (ID: {file_id})")
+        
+        # Upload to Drive
+        with st.spinner("☁️ Uploading to Google Drive..."):
+            file_id, web_link = upload_to_drive(
+                f"{product['asin']}_report.txt",
+                report,
+                drive_folder_id
+            )
+        
+        if file_id:
+            st.success(f"✅ Report saved to Google Drive!")
+            st.markdown(f"**File ID:** `{file_id}`")
+            if web_link:
+                st.link_button("📂 Open in Drive", web_link)
+        
+        # Show copyable report
+        with st.expander("📄 View Full Report"):
+            st.code(report)
 
 # -------------------------------------------------------
 # SEARCH BUTTON
 # -------------------------------------------------------
 st.markdown("---")
 
-if st.button("🔍 Search Deliverable Product"):
+if st.button("🔍 Search Deliverable Product", type="primary", use_container_width=True):
     if not product_name.strip():
-        st.warning("Please enter a product name.")
+        st.warning("⚠️ Please enter a product name.")
     else:
-        results, source = search_amazon_fallback(product_name)
+        with st.spinner(f"🔍 Searching Amazon for '{product_name}'..."):
+            results, source = search_amazon_fallback(product_name)
+        
         if not results:
-            st.error("No deliverable products found.")
+            st.error("❌ No deliverable products found. Try a different search term.")
         else:
             display_product(results[0], source)
+
+# -------------------------------------------------------
+# SIDEBAR INFO
+# -------------------------------------------------------
+with st.sidebar:
+    st.markdown("### 📖 How It Works")
+    st.markdown("""
+    1. **Search** for any Amazon product
+    2. **AI generates** Pinterest-style description
+    3. **Auto-uploads** report to Google Drive
+    4. **Get** affiliate link with your tag
+    """)
+    
+    st.divider()
+    
+    st.markdown("### ⚙️ Configuration")
+    st.markdown(f"**Affiliate Tag:** `{AFFILIATE_TAG}`")
+    st.markdown(f"**AI Model:** {model_choice}")
+    
+    st.divider()
+    
+    st.markdown("### 💡 Tips")
+    st.markdown("""
+    - Use specific product names
+    - Check Drive folder permissions
+    - Verify affiliate tag is yours
+    - SerpAPI has rate limits
+    """)
